@@ -11,9 +11,10 @@ from PyQt5.QtWidgets import (
 )
 
 from database import init_db, insert_record, load_data, get_all_records, delete_record_by_id
-from model import train_model, load_model, predict_week
+from model import train_model, load_model, predict_days
 from utils import build_input_fields
 from visual_analytics import ForecastGraph, ForecastHistoryTable, TemperatureCalendar
+from visual_analytics import TemperatureHeatmapWindow
 from weather_api import get_weather_forecast
 from ensemble_pca_models import (
     train_gradient_boosting, train_xgboost, train_catboost, train_with_pca,
@@ -21,11 +22,87 @@ from ensemble_pca_models import (
 )
 import joblib
 import os
+import sqlite3
 import pandas as pd
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
+
+class RegisterWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Регистрация")
+        self.setFixedSize(300, 200)
+
+        layout = QVBoxLayout()
+        self.login_input = QLineEdit()
+        self.login_input.setPlaceholderText("Новый логин")
+
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Новый пароль")
+        self.password_input.setEchoMode(QLineEdit.Password)
+
+        self.btn_register = QPushButton("Создать аккаунт")
+        self.btn_register.clicked.connect(self.try_register)
+
+        layout.addWidget(QLabel("Регистрация"))
+        layout.addWidget(self.login_input)
+        layout.addWidget(self.password_input)
+        layout.addWidget(self.btn_register)
+        self.setLayout(layout)
+
+    def try_register(self):
+        from database import add_user
+        username = self.login_input.text()
+        password = self.password_input.text()
+        if add_user(username, password):
+            QMessageBox.information(self, "Готово", "Регистрация успешна!")
+            self.close()
+        else:
+            QMessageBox.warning(self, "Ошибка", "Пользователь уже существует.")
+
+class LoginWindow(QWidget):
+    def __init__(self, on_success_callback):
+        super().__init__()
+        self.setWindowTitle("Вход в систему")
+        self.setFixedSize(300, 200)
+        self.on_success_callback = on_success_callback
+
+        layout = QVBoxLayout()
+        self.login_input = QLineEdit()
+        self.login_input.setPlaceholderText("Логин")
+
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Пароль")
+        self.password_input.setEchoMode(QLineEdit.Password)
+
+        self.btn_login = QPushButton("Войти")
+        self.btn_register = QPushButton("Зарегистрироваться")
+
+        self.btn_login.clicked.connect(self.try_login)
+        self.btn_register.clicked.connect(self.try_register)
+
+        layout.addWidget(QLabel("Авторизация"))
+        layout.addWidget(self.login_input)
+        layout.addWidget(self.password_input)
+        layout.addWidget(self.btn_login)
+        layout.addWidget(self.btn_register)
+        self.setLayout(layout)
+
+    def try_login(self):
+        from database import check_user
+        username = self.login_input.text()
+        password = self.password_input.text()
+        if check_user(username, password):
+            self.on_success_callback()
+            self.close()
+        else:
+            QMessageBox.warning(self, "Ошибка", "Неверный логин или пароль.")
+
+    def try_register(self):
+        self.reg_window = RegisterWindow()
+        self.reg_window.show()
 
 class WeatherApp(QWidget):
     def __init__(self):
@@ -39,6 +116,16 @@ class WeatherApp(QWidget):
 
     def setup_ui(self):
         layout = QVBoxLayout()
+
+        self.city_selector = QComboBox()
+        self.city_selector.setEditable(True)
+        self.city_selector.addItems([
+            "Москва", "Санкт-Петербург", "Сочи", "Казань", "Новосибирск"
+        ])
+        self.city_selector.setCurrentText("Москва")  # значение по умолчанию
+
+        layout.addWidget(QLabel("Город для прогноза:"))
+        layout.addWidget(self.city_selector)
 
         self.datetime_label = QLabel()
         layout.addWidget(self.datetime_label)
@@ -75,7 +162,7 @@ class WeatherApp(QWidget):
         layout.addWidget(self.model_selector)
 
         form_layout = QVBoxLayout()
-        for i in range(1, 8):
+        for i in range(1, 11):
             group, inputs, date_input = build_input_fields(i)
             self.inputs.update(inputs)
             self.dates[f"day{i}_date"] = date_input
@@ -117,9 +204,17 @@ class WeatherApp(QWidget):
         btn_mae_graph.clicked.connect(self.show_mae_chart)
         layout.addWidget(btn_mae_graph)
 
-        btn_predict = QPushButton("Сделать прогноз на 7 дней")
+        btn_stats = QPushButton("Статистика проекта")
+        btn_stats.clicked.connect(self.show_stats)
+        layout.addWidget(btn_stats)
+
+        btn_predict = QPushButton("Сделать прогноз на 10 дней")
         btn_predict.clicked.connect(self.predict)
         layout.addWidget(btn_predict)
+
+        btn_heatmap = QPushButton("Тепловая карта")
+        btn_heatmap.clicked.connect(self.show_temperature_heatmap)
+        layout.addWidget(btn_heatmap)
 
         btn_clear = QPushButton("Очистить поля")
         btn_clear.clicked.connect(self.clear_inputs)
@@ -160,8 +255,8 @@ class WeatherApp(QWidget):
         self.datetime_label.setText(f"Текущая дата и время: {now}")
 
     def update_week_dates(self):
-        start = self.start_date_picker.date().addDays(7)
-        for i in range(1, 8):
+        start = self.start_date_picker.date().addDays(10)
+        for i in range(1, 11):
             date_key = f"day{i}_date"
             if date_key in self.dates:
                 self.dates[date_key].setDate(start.addDays(i - 1))
@@ -171,11 +266,19 @@ class WeatherApp(QWidget):
             temp_values = [float(self.inputs[key].text()) for key in self.inputs]
             date_values = [self.dates[key].date().toString("dd.MM.yyyy") for key in self.dates]
             target = float(self.target_input.text())
+
+            # Проверка: 10 дат и 30 температур
+            if len(date_values) != 10 or len(temp_values) != 30:
+                self.result_label.setText("Ошибка: требуется 10 дней (30 температур).")
+                return
+
             insert_record(date_values, temp_values, target)
             self.result_label.setText("Данные добавлены в базу.")
             self.load_record_list()
-        except Exception:
-            self.result_label.setText("Ошибка при сохранении записи.")
+
+        except Exception as e:
+            self.result_label.setText(f"Ошибка при сохранении записи: {str(e)}")
+
 
     def train(self):
         self.model = train_model()
@@ -235,19 +338,20 @@ class WeatherApp(QWidget):
                     df = pca.transform(df)
 
                 pred = model.predict(df)[0]
-                forecast = [round(pred + i * 0.2 + (i % 2), 1) for i in range(21)]
+                forecast = [round(pred + i * 0.2 + (i % 2), 1) for i in range(30)]  # 10 дней * 3 периода
                 self.result_label.setText(f"Использована модель: {best_name} (MAE: {best[1]:.2f})")
 
             else:
-                forecast = predict_week(self.model, input_data)
+                from model import predict_days
+                forecast = predict_days(self.model, input_data, n_days=10)
                 self.result_label.setText("Прогноз выполнен с помощью моделей MLP для утра, дня и вечера")
 
-            start_date = self.start_date_picker.date().addDays(7)
+            start_date = self.start_date_picker.date().addDays(10)
             self.forecast = forecast
             self.start_date = start_date
 
-            forecast_text = "Прогноз на следующую неделю:\n\n"
-            for i in range(7):
+            forecast_text = "Прогноз на 10 дней:\n\n"
+            for i in range(10):
                 date = start_date.addDays(i)
                 date_str = date.toString("dd.MM.yyyy (dddd)")
                 morning = forecast[i * 3]
@@ -275,9 +379,13 @@ class WeatherApp(QWidget):
         self.record_selector.addItem("Выбрать запись из БД...")
         records = get_all_records()
         for r in records:
-            label = f"ID {r['id']} | {r['day1_date']} - {r['day7_date']}"
+            label = f"ID {r['id']} | {r.get('day1_date', '???')} - {r.get('day10_date', '???')}"
             self.record_selector.addItem(label, r)
         self.record_selector.blockSignals(False)
+
+    def show_stats(self):
+        self.stats_window = StatsWindow()
+        self.stats_window.show()
 
     def show_mae_chart(self):
         try:
@@ -346,6 +454,14 @@ class WeatherApp(QWidget):
             self.result_label.setText(f"Ошибка при построении графика: {str(e)}")
 
 
+    def show_temperature_heatmap(self):
+        if hasattr(self, 'forecast') and len(self.forecast) == 30:
+            from visual_analytics import TemperatureHeatmapWindow
+            self.heatmap_window = TemperatureHeatmapWindow(self.forecast)
+            self.heatmap_window.show()
+        else:
+            self.result_label.setText("Сначала сделайте прогноз на 10 дней.")
+
     def show_training_metrics(self):
         try:
             X, y = load_training_data()
@@ -404,6 +520,13 @@ class WeatherApp(QWidget):
         except Exception as e:
             self.result_label.setText(f"Ошибка: {str(e)}")
 
+
+    def show_temperature_heatmap(self):
+        if hasattr(self, "forecast") and len(self.forecast) == 30:
+            self.heatmap_window = TemperatureHeatmapWindow(self.forecast)
+            self.heatmap_window.show()
+        else:
+            self.result_label.setText("Сначала сделайте прогноз на 10 дней.")
 
     def show_feature_importance(self):
         try:
@@ -500,7 +623,7 @@ class WeatherApp(QWidget):
         if not record:
             return
 
-        for i in range(1, 8):
+        for i in range(1, 11):
             date_key = f"day{i}_date"
             if date_key in record:
                 d = QDate.fromString(record[date_key], "dd.MM.yyyy")
@@ -547,12 +670,17 @@ class WeatherApp(QWidget):
         self.calendar_window.show()
 
     def show_real_weather(self):
-        forecast, error = get_weather_forecast(city="Moscow")
+        selected_city = self.city_selector.currentText().strip()
+        if not selected_city:
+            self.result_label.setText("Пожалуйста, введите город.")
+            return
+        forecast, error = get_weather_forecast(city=selected_city)
+
         if error:
             self.result_label.setText(error)
             return
 
-        text = "Прогноз OpenWeather на 7 дней:\n\n"
+        text = "Прогноз OpenWeather на 10 дней:\n\n"
         for day in forecast:
             text += f"{day['date']}:\n"
             text += f"  Температура: {day['temp_avg']} °C\n"
@@ -605,3 +733,38 @@ class WeatherApp(QWidget):
             results.append(f"PCA + Boosting: модель не обучена. ({e})")
 
         self.forecast_output.setText("\n".join(results))
+
+class StatsWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Статистика проекта")
+        self.setFixedSize(400, 250)
+        layout = QVBoxLayout()
+
+        # Количество записей в БД
+        conn = sqlite3.connect("weather_data.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM weather")
+        total_records = cursor.fetchone()[0]
+
+        # Количество пользователей
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total_users = cursor.fetchone()[0]
+
+        conn.close()
+
+        # Подсчёт сохранённых моделей
+        model_files = [
+            "morning_model.pkl", "day_model.pkl", "evening_model.pkl",
+            "cat_model.pkl", "gb_model.pkl", "xgb_model.pkl", "pca_model.pkl", "pca_transform.pkl"
+        ]
+        trained_models = [f for f in model_files if os.path.exists(f)]
+
+        layout.addWidget(QLabel(f"📄 Записей в базе данных: {total_records}"))
+        layout.addWidget(QLabel(f"👤 Зарегистрировано пользователей: {total_users}"))
+        layout.addWidget(QLabel(f"🤖 Обученных моделей: {len(trained_models)}"))
+        layout.addWidget(QLabel("🗂️ Используемые модели:"))
+        for model in trained_models:
+            layout.addWidget(QLabel(f"— {model}"))
+
+        self.setLayout(layout)

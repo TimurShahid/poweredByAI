@@ -5,12 +5,12 @@ API_KEY = "e4018c8dbfb3e5b513f63dfab814dc37"
 BASE_URL = "https://api.openweathermap.org/data/2.5/forecast"
 
 
-def get_weather_forecast(city="Moscow", days=7):
+def get_weather_forecast(city="Moscow", days=10):
     params = {
         "q": city,
         "appid": API_KEY,
         "units": "metric",
-        "cnt": days * 8
+        "cnt": days * 11
     }
     response = requests.get(BASE_URL, params=params)
     if response.status_code != 200:

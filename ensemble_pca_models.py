@@ -11,12 +11,20 @@ import os
 
 
 def load_training_data():
+    import sqlite3
     conn = sqlite3.connect("weather_data.db")
     df = pd.read_sql_query("SELECT * FROM weather", conn)
     conn.close()
+
     features = [col for col in df.columns if col.startswith("day") and "date" not in col and "forecast" not in col]
     X = df[features]
-    y = df["day7_morning"]
+
+    # Выбираем целевую переменную динамически
+    if "day10_morning" in df.columns:
+        y = df["day10_morning"]
+    else:
+        y = df["day7_morning"]
+
     return X, y
 
 
