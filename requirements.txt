@@ -1,0 +1,8 @@
+PyQt5
+pandas
+scikit-learn
+joblib
+matplotlib
+xgboost
+catboost
+requests
